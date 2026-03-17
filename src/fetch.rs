@@ -2,8 +2,9 @@ use crate::{Package, Target, utility::get_with_retry};
 use flate2::read::GzDecoder;
 use reqwest::Client;
 use serde::Deserialize;
-use std::io::Read;
+use std::io::{Cursor, Read};
 use xz2::bufread::XzDecoder;
+use zstd::Decoder;
 
 pub async fn fetch_packages(client: &Client, target: &Target) -> anyhow::Result<Vec<Package>> {
     let suite = if target.pocket == "Release" {
@@ -29,25 +30,13 @@ pub async fn fetch_packages(client: &Client, target: &Target) -> anyhow::Result<
         .filter(|block| !block.is_empty())
         .map(|block| {
             let mut package = Package::default();
-            let mut parsing_files = false;
 
             for line in block.lines() {
-                if parsing_files {
-                    if line.starts_with(' ') {
-                        if let Some(filename) = line.split_whitespace().nth(2)
-                            && filename.ends_with(".dsc")
-                        {
-                            package.dsc = Some(filename.to_string());
-                        }
-                    } else {
-                        parsing_files = false;
-                    }
-                } else if let Some((key, value)) = line.split_once(":") {
+                if let Some((key, value)) = line.split_once(":") {
                     match key {
                         "Package" => package.name = value.trim().to_string(),
                         "Version" => package.version = value.trim().to_string(),
                         "Directory" => package.directory = value.trim().to_string(),
-                        "Files" => parsing_files = true,
                         _ => (),
                     }
                 }
@@ -75,7 +64,7 @@ struct BuildRecords {
 pub async fn fetch_build_log(
     client: &Client,
     target: &Target,
-    package: Package,
+    package: &Package,
 ) -> anyhow::Result<Option<String>> {
     // Get build record.
     let mut url = format!(
@@ -126,4 +115,74 @@ pub async fn fetch_build_log(
     }
 
     Ok(None)
+}
+
+/// Fetches the .deb file for a package in the Ubuntu archive and
+/// extracts the ELF files within.
+pub async fn fetch_elfs(
+    client: &Client,
+    target: &Target,
+    package: &Package,
+) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    let url = format!(
+        "https://archive.ubuntu.com/ubuntu/{}/{}_{}_{}.deb",
+        package.directory, package.name, package.version, target.arch
+    );
+
+    println!("{url}");
+
+    let response = get_with_retry(client, &url).await?;
+    let bytes = response.bytes().await?;
+    let mut archive = ar::Archive::new(&bytes[..]);
+
+    while let Some(entry) = archive.next_entry() {
+        let mut entry = entry?;
+        let name = String::from_utf8_lossy(entry.header().identifier()).to_string();
+
+        if name.starts_with("data.tar") {
+            let mut buffer = Vec::new();
+            entry.read_to_end(&mut buffer)?;
+
+            // Decompress and parse tar.
+            let cursor = Cursor::new(buffer);
+            return if name.ends_with(".gz") {
+                gather_elfs_from_tar(GzDecoder::new(cursor))
+            } else if name.ends_with(".xz") {
+                gather_elfs_from_tar(XzDecoder::new(cursor))
+            } else if name.ends_with(".zst") {
+                gather_elfs_from_tar(Decoder::new(cursor)?)
+            } else {
+                // Uncompressed.
+                gather_elfs_from_tar(cursor)
+            };
+        }
+    }
+
+    anyhow::bail!("data.tar not found in .deb")
+}
+
+/// Parses out and returns all ELF files within a TAR archive.
+fn gather_elfs_from_tar<R: Read>(reader: R) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    let mut archive = tar::Archive::new(reader);
+    let mut results = Vec::new();
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+
+        // Skip non-files.
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path()?.to_string_lossy().into_owned();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+
+        // If the file has the ELF starting bytes, gather it.
+        if bytes.starts_with(b"\x7fELF") {
+            results.push((path, bytes));
+        }
+    }
+
+    Ok(results)
 }
