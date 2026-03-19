@@ -1,5 +1,6 @@
 use crate::package::BinaryPackage;
 use flate2::read::GzDecoder;
+use goblin::elf::Elf;
 use std::io::{Cursor, Read};
 use xz2::bufread::XzDecoder;
 use zstd::Decoder;
@@ -60,4 +61,24 @@ fn gather_elfs_from_tar<R: Read>(reader: R) -> anyhow::Result<Vec<(String, Vec<u
     }
 
     Ok(results)
+}
+
+pub fn parse_elf(bytes: &[u8]) -> anyhow::Result<()> {
+    let elf = Elf::parse(bytes)?;
+
+    println!("type: {:?}", elf.header.e_type);
+    println!("arch: {:?}", elf.header.e_machine);
+    println!("entry: 0x{:x}", elf.entry);
+
+    for ph in &elf.program_headers {
+        println!("ph: type={:?} flags={:?}", ph.p_type, ph.p_flags);
+    }
+
+    for sym in &elf.syms {
+        if let Some(name) = elf.strtab.get_at(sym.st_name) {
+            println!("symbol: {}", name);
+        }
+    }
+
+    Ok(())
 }

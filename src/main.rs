@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let packages = fetch_packages(&client, &target).await?;
 
     //std::fs::create_dir("build_flags")?;
-    for (source_package, binary_packages) in packages {
+    for (source_package, binary_packages) in packages.into_iter().take(3) {
         println!("{}_{}", source_package.name, source_package.version);
 
         // Get build log.
@@ -47,8 +47,10 @@ async fn main() -> anyhow::Result<()> {
 
         for binary_package in binary_packages {
             let elfs = extract_elfs_from_binary_package(&binary_package).await?;
+            println!("{} elfs extracted", elfs.len());
             for (path, data) in elfs {
                 println!("{}: {} bytes", path, data.len());
+                parse_elf(&data[..])?;
             }
         }
     }

@@ -1,4 +1,4 @@
-use crate::{Target, package};
+use crate::Target;
 use reqwest::Client;
 use std::{collections::HashMap, io::Read};
 use xz2::bufread::XzDecoder;
@@ -48,7 +48,11 @@ pub async fn fetch_packages(
 
     // Parse Sources into source packages.
     let mut packages = HashMap::new();
-    for block in content.split("\n\n").filter(|block| !block.is_empty()) {
+    for block in content
+        .split("\n\n")
+        .filter(|block| !block.is_empty())
+        .take(10)
+    {
         let mut package = SourcePackage::default();
 
         for line in block.lines() {
@@ -92,31 +96,32 @@ pub async fn fetch_packages(
                         if let Some((source_package, _)) = packages.get_mut(value.trim()) {
                             source = source_package.name.clone();
                         } else {
-                            anyhow::bail!(
-                                "Found a binary package '{}' without an accompying source package '{}'.",
-                                name,
-                                value
-                            );
+                            //anyhow::bail!(
+                            //    "Found a binary package '{}' without an accompying source package '{}'.",
+                            //    name,
+                            //    value
+                            //);
                         }
                     }
                     "Filename" => {
                         println!("{} {} {}", name.clone(), source.clone(), value);
-
-                        // Fetch .deb file.
-                        let url = format!("{}/{}", archive_url, value.trim());
-                        let response = client.get(url).send().await?.error_for_status()?;
-                        let deb = response.bytes().await?.into();
 
                         // If there's no source field, assume the source is named the same as the binary package.
                         if source.is_empty() {
                             source = name.clone();
                         }
 
-                        // Add binary package to it's source package.
-                        let (_, binary_packages) = packages.get_mut(&source).unwrap();
-                        binary_packages.push(BinaryPackage { name, version, deb });
+                        // If the source package was fetched:
+                        if let Some((_, binary_packages)) = packages.get_mut(&source) {
+                            // Fetch .deb file.
+                            let url = format!("{}/{}", archive_url, value.trim());
+                            let response = client.get(url).send().await?.error_for_status()?;
+                            let deb = response.bytes().await?.into();
 
-                        continue 'block_iteration;
+                            // Add binary package to it's source package.
+                            binary_packages.push(BinaryPackage { name, version, deb });
+                            continue 'block_iteration;
+                        }
                     }
                     _ => (),
                 }
