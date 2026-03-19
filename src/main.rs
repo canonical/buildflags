@@ -1,7 +1,11 @@
-mod fetch;
+mod buildlog;
+mod elf;
+mod package;
 mod utility;
 
-use fetch::*;
+use buildlog::*;
+use elf::*;
+use package::*;
 use reqwest::Client;
 
 #[derive(Debug, Clone)]
@@ -12,29 +16,24 @@ pub struct Target {
     arch: String,
 }
 
-#[derive(Default, Debug, Clone)]
-pub struct Package {
-    name: String,
-    version: String,
-    directory: String,
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let target = Target {
         series: "resolute".to_string(),
-        pocket: "Proposed".to_string(),
+        pocket: "Release".to_string(),
         component: "main".to_string(),
         arch: "amd64".to_string(),
     };
-    let client = Client::new();
+    let client = Client::builder()
+        .user_agent("ubuntu-buildflags-audit/0.1")
+        .build()?;
 
     // Get packages.
     let packages = fetch_packages(&client, &target).await?;
 
     //std::fs::create_dir("build_flags")?;
-    for package in packages {
-        println!("{}_{}", package.name, package.version);
+    for (source_package, binary_packages) in packages {
+        println!("{}_{}", source_package.name, source_package.version);
 
         // Get build log.
         //if let Some(build_log) = fetch_build_log(&client, &target, &package).await? {
@@ -45,9 +44,12 @@ async fn main() -> anyhow::Result<()> {
         //}
 
         // Get elf files.
-        let elfs = fetch_elfs(&client, &target, &package).await?;
-        for (path, data) in elfs {
-            println!("{}: {} bytes", path, data.len());
+
+        for binary_package in binary_packages {
+            let elfs = extract_elfs_from_binary_package(&binary_package).await?;
+            for (path, data) in elfs {
+                println!("{}: {} bytes", path, data.len());
+            }
         }
     }
 
