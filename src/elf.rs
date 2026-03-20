@@ -1,7 +1,10 @@
 use crate::package::BinaryPackage;
 use flate2::read::GzDecoder;
-use goblin::elf::Elf;
-use std::io::{Cursor, Read};
+use goblin::elf::{Elf, dynamic::*, header::*, program_header::*};
+use std::{
+    collections::HashMap,
+    io::{Cursor, Read},
+};
 use xz2::bufread::XzDecoder;
 use zstd::Decoder;
 
@@ -22,14 +25,14 @@ pub async fn extract_elfs_from_binary_package(
             // Decompress and parse tar.
             let cursor = Cursor::new(buffer);
             return if name.ends_with(".gz") {
-                gather_elfs_from_tar(GzDecoder::new(cursor))
+                extract_elfs_from_tar(GzDecoder::new(cursor))
             } else if name.ends_with(".xz") {
-                gather_elfs_from_tar(XzDecoder::new(cursor))
+                extract_elfs_from_tar(XzDecoder::new(cursor))
             } else if name.ends_with(".zst") {
-                gather_elfs_from_tar(Decoder::new(cursor)?)
+                extract_elfs_from_tar(Decoder::new(cursor)?)
             } else {
                 // Uncompressed.
-                gather_elfs_from_tar(cursor)
+                extract_elfs_from_tar(cursor)
             };
         }
     }
@@ -38,7 +41,7 @@ pub async fn extract_elfs_from_binary_package(
 }
 
 /// Parses out and returns all ELF files within a TAR archive.
-fn gather_elfs_from_tar<R: Read>(reader: R) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+fn extract_elfs_from_tar<R: Read>(reader: R) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
     let mut archive = tar::Archive::new(reader);
     let mut results = Vec::new();
 
@@ -63,22 +66,59 @@ fn gather_elfs_from_tar<R: Read>(reader: R) -> anyhow::Result<Vec<(String, Vec<u
     Ok(results)
 }
 
-pub fn parse_elf(bytes: &[u8]) -> anyhow::Result<()> {
+pub fn detect_build_flags_from_elf(bytes: &[u8]) -> anyhow::Result<HashMap<String, bool>> {
     let elf = Elf::parse(bytes)?;
 
-    println!("type: {:?}", elf.header.e_type);
-    println!("arch: {:?}", elf.header.e_machine);
-    println!("entry: 0x{:x}", elf.entry);
+    let mut flags = HashMap::new();
 
-    for ph in &elf.program_headers {
-        println!("ph: type={:?} flags={:?}", ph.p_type, ph.p_flags);
-    }
+    flags.insert(
+        "-fstack-protector-strong".to_string(),
+        elf.dynsyms
+            .iter()
+            .any(|sym| elf.dynstrtab.get_at(sym.st_name) == Some("__stack_chk_fail")),
+    );
 
-    for sym in &elf.syms {
-        if let Some(name) = elf.strtab.get_at(sym.st_name) {
-            println!("symbol: {}", name);
-        }
-    }
+    let fortify_source = elf.dynsyms.iter().any(|sym| {
+        elf.dynstrtab
+            .get_at(sym.st_name)
+            .map(|s| s.ends_with("_chk"))
+            .unwrap_or(false)
+    });
+    flags.insert("-D_FORTIFY_SOURCE=2".to_string(), fortify_source);
+    flags.insert("-D_FORTIFY_SOURCE=3".to_string(), fortify_source);
 
-    Ok(())
+    flags.insert(
+        "-Wl,-z,relro".to_string(),
+        elf.program_headers
+            .iter()
+            .any(|ph| ph.p_type == PT_GNU_RELRO),
+    );
+
+    flags.insert(
+        "-Wl,-z,now".to_string(),
+        elf.dynamic
+            .map(|d| d.dyns.iter().any(|x| x.d_tag == DT_BIND_NOW))
+            .unwrap_or(false),
+    );
+
+    flags.insert("-fPIE".to_string(), elf.header.e_type == ET_DYN);
+
+    flags.insert(
+        "-fcf-protection".to_string(),
+        elf.section_headers
+            .iter()
+            .any(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(".note.gnu.property")),
+    );
+
+    flags.insert(
+        "-g".to_string(),
+        elf.section_headers.iter().any(|sh| {
+            elf.shdr_strtab
+                .get_at(sh.sh_name)
+                .map(|n| n.starts_with(".debug_"))
+                .unwrap_or(false)
+        }),
+    );
+
+    Ok(flags)
 }

@@ -1,10 +1,12 @@
 mod buildlog;
 mod elf;
+mod flags;
 mod package;
 mod utility;
 
 use buildlog::*;
 use elf::*;
+use flags::*;
 use package::*;
 use reqwest::Client;
 
@@ -28,8 +30,12 @@ async fn main() -> anyhow::Result<()> {
         .user_agent("ubuntu-buildflags-audit/0.1")
         .build()?;
 
+    // Get build flags.
+    let build_flags = get_build_flags()?;
+
     // Get packages.
-    let packages = fetch_packages(&client, &target).await?;
+    let packages: Vec<(SourcePackage, Vec<BinaryPackage>)> =
+        fetch_packages(&client, &target).await?;
 
     //std::fs::create_dir("build_flags")?;
     for (source_package, binary_packages) in packages.into_iter().take(3) {
@@ -44,13 +50,14 @@ async fn main() -> anyhow::Result<()> {
         //}
 
         // Get elf files.
-
         for binary_package in binary_packages {
             let elfs = extract_elfs_from_binary_package(&binary_package).await?;
             println!("{} elfs extracted", elfs.len());
+            // Validate elf files.
             for (path, data) in elfs {
                 println!("{}: {} bytes", path, data.len());
-                parse_elf(&data[..])?;
+                let flags = detect_build_flags_from_elf(&data[..])?;
+                println!("{flags:?}")
             }
         }
     }
